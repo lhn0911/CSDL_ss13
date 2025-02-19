@@ -79,85 +79,84 @@ INSERT INTO student_wallets (student_id, balance) VALUES
 -- 4
 DELIMITER //
 
-CREATE PROCEDURE EnrollCourse(
-    IN p_student_name VARCHAR(50),
-    IN p_course_name VARCHAR(100)
-)
+CREATE PROCEDURE AutoEnrollStudents(IN p_course_name VARCHAR(100))
 BEGIN
     DECLARE v_student_id INT;
     DECLARE v_course_id INT;
     DECLARE v_fee DECIMAL(10,2);
     DECLARE v_balance DECIMAL(10,2);
     DECLARE v_available_seats INT;
-    
-    -- Bắt đầu giao dịch
-    START TRANSACTION;
+    DECLARE done INT DEFAULT 0;
 
-    -- Kiểm tra sinh viên có tồn tại không
-    SELECT student_id INTO v_student_id FROM students WHERE name = p_student_name;
-    IF v_student_id IS NULL THEN
-        INSERT INTO enrollment_history (student_name, course_name, status) 
-        VALUES (p_student_name, p_course_name, 'FAILED: Student does not exist');
-        ROLLBACK;
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Student does not exist';
-    END IF;
+    -- Con trỏ để duyệt danh sách sinh viên chưa đăng ký
+    DECLARE cur CURSOR FOR 
+    SELECT student_id FROM students 
+    WHERE student_id NOT IN (SELECT student_id FROM enrollments WHERE course_id = v_course_id);
 
-    -- Kiểm tra môn học có tồn tại không
+    -- Xử lý lỗi con trỏ
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+
+    -- Lấy thông tin môn học
     SELECT course_id, available_seats INTO v_course_id, v_available_seats 
     FROM courses WHERE name = p_course_name;
+    
     IF v_course_id IS NULL THEN
-        INSERT INTO enrollment_history (student_name, course_name, status) 
-        VALUES (p_student_name, p_course_name, 'FAILED: Course does not exist');
-        ROLLBACK;
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Course does not exist';
     END IF;
 
-    -- Kiểm tra sinh viên đã đăng ký môn học này chưa
-    IF EXISTS (SELECT 1 FROM enrollments WHERE student_id = v_student_id AND course_id = v_course_id) THEN
-        INSERT INTO enrollment_history (student_name, course_name, status) 
-        VALUES (p_student_name, p_course_name, 'FAILED: Already enrolled');
-        ROLLBACK;
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Already enrolled';
-    END IF;
-
-    -- Kiểm tra môn học còn chỗ trống không
+    -- Nếu không còn chỗ trống, thoát
     IF v_available_seats <= 0 THEN
-        INSERT INTO enrollment_history (student_name, course_name, status) 
-        VALUES (p_student_name, p_course_name, 'FAILED: No available seats');
-        ROLLBACK;
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No available seats';
     END IF;
 
-    -- Kiểm tra số dư tài khoản của sinh viên
-    SELECT balance INTO v_balance FROM student_wallets WHERE student_id = v_student_id;
-    SELECT fee INTO v_fee FROM course_fees WHERE course_id = v_course_id;
-    IF v_balance < v_fee THEN
-        INSERT INTO enrollment_history (student_name, course_name, status) 
-        VALUES (p_student_name, p_course_name, 'FAILED: Insufficient balance');
-        ROLLBACK;
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Insufficient balance';
-    END IF;
+    -- Mở con trỏ
+    OPEN cur;
 
-    -- Thực hiện đăng ký môn học
-    INSERT INTO enrollments (student_id, course_id, enrollment_date) 
-    VALUES (v_student_id, v_course_id, NOW());
+    -- Lặp qua danh sách sinh viên
+    enroll_loop: LOOP
+        FETCH cur INTO v_student_id;
+        IF done = 1 THEN 
+            LEAVE enroll_loop; 
+        END IF;
 
-    -- Trừ tiền từ tài khoản sinh viên
-    UPDATE student_wallets SET balance = balance - v_fee WHERE student_id = v_student_id;
+        -- Kiểm tra số dư tài khoản sinh viên
+        SELECT balance INTO v_balance FROM student_wallets WHERE student_id = v_student_id;
+        SELECT fee INTO v_fee FROM course_fees WHERE course_id = v_course_id;
 
-    -- Giảm số lượng chỗ trống của môn học
-    UPDATE courses SET available_seats = available_seats - 1 WHERE course_id = v_course_id;
+        -- Nếu sinh viên không đủ tiền -> bỏ qua sinh viên này
+        IF v_balance < v_fee THEN
+            INSERT INTO enrollment_history (student_id, course_id, status) 
+            VALUES (v_student_id, v_course_id, 'FAILED: Insufficient balance');
+            ITERATE enroll_loop; 
+        END IF;
 
-    -- Ghi vào bảng lịch sử đăng ký
-    INSERT INTO enrollment_history (student_name, course_name, status) 
-    VALUES (p_student_name, p_course_name, 'REGISTERED');
+        -- Đăng ký môn học
+        INSERT INTO enrollments (student_id, course_id, enrollment_date) 
+        VALUES (v_student_id, v_course_id, NOW());
+
+        -- Trừ tiền từ tài khoản sinh viên
+        UPDATE student_wallets SET balance = balance - v_fee WHERE student_id = v_student_id;
+
+        -- Giảm số lượng chỗ trống của môn học
+        UPDATE courses SET available_seats = available_seats - 1 WHERE course_id = v_course_id;
+
+        -- Ghi vào bảng lịch sử đăng ký
+        INSERT INTO enrollment_history (student_id, course_id, status) 
+        VALUES (v_student_id, v_course_id, 'REGISTERED');
+
+    END LOOP;
+
+    -- Đóng con trỏ
+    CLOSE cur;
 
     -- Commit transaction
     COMMIT;
 END //
 
 DELIMITER ;
+
 -- 5
-CALL EnrollCourse('Nguyen Van A', 'Database Systems');
+CALL AutoEnrollStudents('Database Systems');
+
 -- 6
 SELECT * FROM student_wallets WHERE student_id = (SELECT student_id FROM students WHERE name = 'Nguyen Van A');
