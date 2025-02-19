@@ -1,30 +1,41 @@
-CREATE TABLE students (
-    student_id INT PRIMARY KEY AUTO_INCREMENT,
-    student_name VARCHAR(50)
+USE ss13;
+-- Bảng quỹ công ty
+CREATE TABLE company_funds (
+    fund_id INT PRIMARY KEY AUTO_INCREMENT,
+    balance DECIMAL(15,2) NOT NULL
 );
 
-CREATE TABLE courses (
-    course_id INT PRIMARY KEY AUTO_INCREMENT,
-    course_name VARCHAR(100),
-    available_seats INT NOT NULL
+-- Bảng nhân viên
+CREATE TABLE employees (
+    emp_id INT PRIMARY KEY AUTO_INCREMENT,
+    emp_name VARCHAR(50) NOT NULL,
+    salary DECIMAL(10,2) NOT NULL
 );
 
-CREATE TABLE enrollments (
-    enrollment_id INT PRIMARY KEY AUTO_INCREMENT,
-    student_id INT,
-    course_id INT,
-    FOREIGN KEY (student_id) REFERENCES students(student_id),
-    FOREIGN KEY (course_id) REFERENCES courses(course_id)
+-- Bảng lương
+CREATE TABLE payroll (
+    payroll_id INT PRIMARY KEY AUTO_INCREMENT,
+    emp_id INT,
+    salary DECIMAL(10,2) NOT NULL,
+    pay_date DATE NOT NULL,
+    FOREIGN KEY (emp_id) REFERENCES employees(emp_id)
 );
-CREATE TABLE enrollments_history (
-    history_id INT PRIMARY KEY AUTO_INCREMENT,
-    student_id INT,
-    course_id INT,
-    action VARCHAR(50),
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (student_id) REFERENCES students(student_id),
-    FOREIGN KEY (course_id) REFERENCES courses(course_id)
+
+-- Bảng log giao dịch
+CREATE TABLE transaction_log (
+    log_id INT PRIMARY KEY AUTO_INCREMENT,
+    log_message TEXT NOT NULL,
+    log_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Bảng ngân hàng
+CREATE TABLE banks (
+    bank_id INT PRIMARY KEY AUTO_INCREMENT,
+    bank_name VARCHAR(255) NOT NULL,
+    status ENUM('ACTIVE', 'ERROR') NOT NULL DEFAULT 'ACTIVE'
+);
+
+-- Bảng tài khoản nhân viên
 CREATE TABLE account (
     acc_id INT PRIMARY KEY AUTO_INCREMENT,
     emp_id INT,
@@ -35,48 +46,42 @@ CREATE TABLE account (
     FOREIGN KEY (bank_id) REFERENCES banks(bank_id)
 );
 
-INSERT INTO students (student_name) VALUES ('Nguyễn Văn An'), ('Trần Thị Ba');
+-- Thêm dữ liệu mẫu
+INSERT INTO company_funds (balance) VALUES (50000.00);
 
-INSERT INTO courses (course_name, available_seats) VALUES 
-('Lập trình C', 25), 
-('Cơ sở dữ liệu', 22);
--- 3
+INSERT INTO employees (emp_name, salary) VALUES 
+('Nguyễn Văn A', 12000.00), 
+('Trần Thị B', 9000.00);
+
+INSERT INTO banks (bank_name) VALUES ('Vietcombank');
 
 INSERT INTO account (emp_id, bank_id, amount_added, total_amount) VALUES
-
 (1, 1, 0.00, 12500.00),  
+(2, 1, 0.00, 8900.00);
 
-(2, 1, 0.00, 8900.00),   
-
-(3, 1, 0.00, 10200.00),  
-
-(4, 1, 0.00, 15000.00),  
-
-(5, 1, 0.00, 7600.00);
--- 4
+-- Thủ tục chuyển lương
 DELIMITER //
 
-CREATE PROCEDURE TransferSalaryAll()
+CREATE PROCEDURE TransferSalaryAll(IN v_bank_id INT)
 BEGIN
     DECLARE done INT DEFAULT 0;
     DECLARE v_emp_id INT;
     DECLARE v_salary DECIMAL(15,2);
-    DECLARE v_bank_id INT;
     DECLARE v_company_balance DECIMAL(15,2);
     DECLARE v_total_paid INT DEFAULT 0;
     
     -- Con trỏ để duyệt danh sách nhân viên
     DECLARE cur CURSOR FOR 
-    SELECT emp_id, salary, bank_id FROM employees;
+    SELECT emp_id, salary FROM employees;
     
     -- Xử lý khi kết thúc vòng lặp con trỏ
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
     
     -- Kiểm tra số dư quỹ công ty
-    SELECT balance INTO v_company_balance FROM company_funds WHERE bank_id = (SELECT bank_id FROM company_funds LIMIT 1);
+    SELECT balance INTO v_company_balance FROM company_funds LIMIT 1;
     
     -- Kiểm tra nếu không đủ tiền
-    IF v_company_balance <= (SELECT SUM(salary) FROM employees) THEN
+    IF v_company_balance < (SELECT SUM(salary) FROM employees) THEN
         INSERT INTO transaction_log (log_message) VALUES ('FAILED: Not enough company funds');
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Not enough company funds';
     END IF;
@@ -88,24 +93,21 @@ BEGIN
     OPEN cur;
     
     read_loop: LOOP
-        FETCH cur INTO v_emp_id, v_salary, v_bank_id;
+        FETCH cur INTO v_emp_id, v_salary;
         IF done THEN
             LEAVE read_loop;
         END IF;
         
         -- Trừ tiền từ quỹ công ty
-        UPDATE company_funds SET balance = balance - v_salary WHERE bank_id = v_bank_id;
+        UPDATE company_funds SET balance = balance - v_salary LIMIT 1;
         
-        -- Thêm vào bảng payroll (Trigger sẽ kiểm tra trạng thái ngân hàng)
-        INSERT INTO payroll (emp_id, amount, bank_id, pay_date) VALUES (v_emp_id, v_salary, v_bank_id, NOW());
-        
-        -- Cập nhật ngày trả lương của nhân viên
-        UPDATE employees SET last_pay_date = NOW() WHERE emp_id = v_emp_id;
+        -- Thêm vào bảng payroll
+        INSERT INTO payroll (emp_id, salary, pay_date) VALUES (v_emp_id, v_salary, NOW());
         
         -- Cập nhật tài khoản nhân viên
         UPDATE account 
         SET total_amount = total_amount + v_salary, amount_added = v_salary 
-        WHERE emp_id = v_emp_id;
+        WHERE emp_id = v_emp_id AND bank_id = v_bank_id;
         
         -- Đếm số nhân viên đã nhận lương
         SET v_total_paid = v_total_paid + 1;
@@ -123,9 +125,11 @@ BEGIN
 END //
 
 DELIMITER ;
--- 5
-CALL TransferSalaryAll();
--- 6
+
+-- Gọi thủ tục
+CALL TransferSalaryAll(1);
+
+-- Kiểm tra dữ liệu
 SELECT * FROM company_funds;
 SELECT * FROM payroll;
 SELECT * FROM account;
